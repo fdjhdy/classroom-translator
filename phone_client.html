@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d0d0f">
+<title>课堂同传</title>
+<style>
+  :root { --bg:#0d0d0f; --card:#1a1a1e; --line:#2c2c31; --txt:#f2f2f5;
+          --dim:#8e8e96; --accent:#5b8cff; --live:#f6c343; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--txt);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif; }
+
+  /* ---------- 顶栏 ---------- */
+  #bar { position: fixed; top: 0; left: 0; right: 0; z-index: 20;
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 14px calc(10px + env(safe-area-inset-top) * 0);
+    padding-top: calc(10px + env(safe-area-inset-top));
+    background: rgba(13,13,15,.92); backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line); }
+  #subrow { width: 100%; display: flex; align-items: center; gap: 8px; }
+  #subrow .lbl { font-size: 12px; color: var(--dim); flex-shrink: 0; }
+  #subject { flex: 1; min-width: 0; background: var(--card);
+    border: 1px solid var(--line); border-radius: 8px; color: var(--txt);
+    font-size: 14px; padding: 6px 10px; outline: none; }
+  #subject:focus { border-color: var(--accent); }
+  #dot { width: 9px; height: 9px; border-radius: 50%; background: #555;
+    flex-shrink: 0; transition: background .3s; }
+  #dot.on { background: #3ddc84; box-shadow: 0 0 8px #3ddc84; }
+  #dot.err { background: #ff5f57; }
+  #status { flex: 1; font-size: 13px; color: var(--dim); overflow: hidden;
+    white-space: nowrap; text-overflow: ellipsis; }
+  /* 麦克风音量条 */
+  #micwrap { position: absolute; left: 0; right: 0; bottom: -1px; height: 3px;
+    background: transparent; }
+  #micbar { height: 100%; width: 0%; background: #3ddc84;
+    transition: width .12s linear; border-radius: 0 2px 2px 0; }
+  .btn { padding: 7px 16px; font-size: 14px; border: 0; border-radius: 999px;
+    background: var(--accent); color: #fff; font-weight: 600; }
+  .btn.ghost { background: transparent; color: var(--dim);
+    border: 1px solid var(--line); }
+  .btn:disabled { opacity: .4; }
+
+  /* ---------- 实时字幕区 ---------- */
+  #view-live { padding: 118px 14px 20vh; }
+  .entry { background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 12px 14px; margin-bottom: 12px;
+    animation: pop .25s ease; }
+  @keyframes pop { from { opacity: 0; transform: translateY(6px); } }
+  .entry .t { font-size: 11px; color: var(--dim); margin-bottom: 5px;
+    font-variant-numeric: tabular-nums; }
+  .entry .ru { font-size: 13px; color: var(--dim); line-height: 1.55;
+    margin-bottom: 6px; }
+  .entry .zh { font-size: 17px; line-height: 1.65; }
+
+  /* ---------- 底部半成品条 ---------- */
+  #partial { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+    min-height: 52px; background: rgba(20,20,24,.94);
+    backdrop-filter: blur(12px); border-top: 1px solid var(--line);
+    color: var(--live); font-size: 15px; line-height: 1.5; }
+
+  /* ---------- 历史记录 ---------- */
+  #view-hist { display: none; padding: 118px 14px 90px; }
+  .rec { display: flex; align-items: center; gap: 12px;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 14px; margin-bottom: 10px; }
+  .rec .meta { flex: 1; min-width: 0; }
+  .rec .title { font-size: 15px; font-weight: 600; margin-bottom: 3px;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .rec .sub { font-size: 12px; color: var(--dim); }
+  .rec .arrow { color: var(--dim); font-size: 18px; }
+  #reader { display: none; padding: 118px 16px 90px; font-size: 15px;
+    line-height: 1.8; }
+  #reader h2 { font-size: 19px; margin: 4px 0 2px; }
+  #reader .meta { color: var(--dim); font-size: 12px; margin-bottom: 16px; }
+  #reader .seg { margin-bottom: 18px; }
+  #reader .seg .t { font-size: 11px; color: var(--accent);
+    font-variant-numeric: tabular-nums; }
+  #reader .seg .ru { color: var(--dim); font-size: 13px; margin: 4px 0; }
+  #reader .seg .zh { font-size: 16px; }
+  .empty { text-align: center; color: var(--dim); padding: 60px 0; font-size: 14px; }
+</style>
+</head>
+<body>
+
+<div id="bar">
+  <span id="dot"></span>
+  <span id="status">未开始</span>
+  <button id="btnHist" class="btn ghost">记录</button>
+  <button id="btnBack" class="btn ghost" style="display:none">返回</button>
+  <button id="btnStart" class="btn">开始</button>
+  <div id="subrow">
+    <span class="lbl">课程</span>
+    <input id="subject" placeholder="如：宏观经济学（填一次自动记住）">
+  </div>
+  <div id="micwrap"><div id="micbar"></div></div>
+</div>
+
+<div id="view-live"></div>
+<div id="view-hist"><div class="empty">加载中…</div></div>
+<div id="reader"></div>
+<div id="partial">点「开始」，把手机对着老师</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => s.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let ws = null, ctx = null, node = null, stream = null, running = false;
+
+/* HTTP 兼容模式：WebSocket 被代理吞掉时自动启用 */
+const cid = Math.random().toString(16).slice(2) + Date.now().toString(16);
+const API_BASE = location.hostname.endsWith(".ts.net")
+  ? `https://${location.hostname}:8443`          // Tailscale Serve：8443 映射主机 8766
+  : `${location.protocol}//${location.hostname}:8766`;
+let wsFails = 0, httpMode = false, audioBuf = [], httpTimers = [];
+
+async function pushAudio() {
+  if (!audioBuf.length) return;
+  const parts = audioBuf; audioBuf = [];
+  const total = parts.reduce((s, a) => s + a.length, 0);
+  const merged = new Int16Array(total);
+  let off = 0;
+  for (const p of parts) { merged.set(p, off); off += p.length; }
+  try {
+    await fetch(`${API_BASE}/api/audio?id=${cid}`, { method: "POST", body: merged.buffer });
+  } catch (_) {}
+}
+
+async function pollMsgs() {
+  try {
+    const d = await (await fetch(`${API_BASE}/api/poll?id=${cid}`)).json();
+    (d.msgs || []).forEach(render);
+  } catch (_) {}
+}
+
+function startHttpMode() {
+  httpMode = true;
+  setStatus("已连接（兼容模式）· 听课中", "on");
+  sendConfig();
+  httpTimers.push(setInterval(pushAudio, 800));
+  httpTimers.push(setInterval(pollMsgs, 800));
+}
+
+function setStatus(t, mode) {
+  $("#status").textContent = t;
+  $("#dot").className = mode === "on" ? "on" : mode === "err" ? "err" : "";
+}
+
+/* ================= 实时部分 ================= */
+async function start() {
+  $("#btnStart").disabled = true;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }
+    });
+    ctx = new AudioContext({ sampleRate: 16000 });
+    await ctx.resume();
+    const src = ctx.createMediaStreamSource(stream);
+    node = ctx.createScriptProcessor(4096, 1, 1);
+    src.connect(node);
+    node.connect(ctx.destination);
+    node.onaudioprocess = e => {
+      const f32 = e.inputBuffer.getChannelData(0);
+      // 实时音量条：不管连没连上都显示，方便排查收音
+      let sum = 0;
+      for (let i = 0; i < f32.length; i++) sum += f32[i] * f32[i];
+      const rms = Math.sqrt(sum / f32.length);
+      $("#micbar").style.width = Math.min(100, rms * 400) + "%";
+      const i16 = new Int16Array(f32.length);
+      for (let i = 0; i < f32.length; i++) {
+        const s = Math.max(-1, Math.min(1, f32[i]));
+        i16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      if (httpMode) { audioBuf.push(i16); return; }
+      if (ws && ws.readyState === 1) ws.send(i16.buffer);
+    };
+    running = true;
+    try { await navigator.wakeLock.request("screen"); } catch (_) {}
+    connect();
+    $("#btnStart").textContent = "结束";
+    $("#btnStart").disabled = false;
+  } catch (err) {
+    setStatus("麦克风打开失败：" + err.message, "err");
+    $("#btnStart").disabled = false;
+  }
+}
+
+function stop() {
+  running = false;
+  if (ws) ws.close();
+  httpTimers.forEach(clearInterval); httpTimers = [];
+  httpMode = false; wsFails = 0; audioBuf = [];
+  if (node) node.disconnect();
+  if (ctx) ctx.close();
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  setStatus("已结束");
+  $("#partial").textContent = "本节课已结束，记录已保存在主机上";
+  $("#btnStart").textContent = "开始";
+}
+
+/* 课程名：本地记住 + 连接后自动同步给主机 */
+const subjectInput = $("#subject");
+subjectInput.value = localStorage.getItem("subject") || "";
+subjectInput.addEventListener("change", () => {
+  localStorage.setItem("subject", subjectInput.value);
+  sendConfig();
+});
+function sendConfig() {
+  const subj = subjectInput.value.trim();
+  if (httpMode) {
+    fetch(`${API_BASE}/api/config?id=${cid}&subject=${encodeURIComponent(subj)}`).catch(() => {});
+  } else if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: "config", subject: subj }));
+  }
+}
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(proto + "://" + location.host);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => { wsFails = 0; setStatus("已连接主机 · 听课中", "on"); sendConfig(); };
+  ws.onmessage = ev => render(JSON.parse(ev.data));
+  ws.onclose = () => {
+    if (!running || httpMode) return;
+    wsFails++;
+    if (wsFails >= 2) { startHttpMode(); return; }  // WS 连续失败，自动切 HTTP 兼容模式
+    setStatus("断线，3 秒后重连…", "err");
+    setTimeout(connect, 3000);
+  };
+}
+
+function render(o) {
+  if (o.kind === "status") { setStatus(o.text || "", "on"); return; }
+  if (o.kind === "partial") { $("#partial").textContent = "▶ " + (o.ru || ""); return; }
+  if (o.kind === "final") {
+    $("#partial").textContent = "…";
+    const d = document.createElement("div");
+    d.className = "entry";
+    d.innerHTML = `<div class="t">${new Date().toLocaleTimeString("zh-CN", {hour12:false})}</div>` +
+                  `<div class="ru">${esc(o.ru || "")}</div>` +
+                  `<div class="zh">${esc(o.zh || "")}</div>`;
+    const v = $("#view-live");
+    v.appendChild(d);
+    while (v.childElementCount > 200) v.removeChild(v.firstChild);
+    window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+  }
+}
+
+/* ================= 历史记录部分 ================= */
+function show(view) {
+  $("#view-live").style.display = view === "live" ? "" : "none";
+  $("#view-hist").style.display = view === "hist" ? "" : "none";
+  $("#reader").style.display = view === "reader" ? "" : "none";
+  $("#partial").style.display = view === "live" ? "" : "none";
+  $("#btnHist").style.display = view === "live" ? "" : "none";
+  $("#btnBack").style.display = view === "live" ? "none" : "";
+  window.scrollTo(0, 0);
+}
+
+async function loadHistory() {
+  show("hist");
+  const box = $("#view-hist");
+  try {
+    const list = await (await fetch("/api/records")).json();
+    if (!list.length) { box.innerHTML = '<div class="empty">还没有课程记录</div>'; return; }
+    box.innerHTML = "";
+    for (const r of list) {
+      const d = document.createElement("div");
+      d.className = "rec";
+      d.innerHTML = `<div class="meta"><div class="title">${esc(r.title)}</div>` +
+        `<div class="sub">${esc(r.name)} · ${(r.size / 1024).toFixed(1)} KB</div></div>` +
+        `<div class="arrow">›</div>`;
+      d.onclick = () => openRecord(r.name);
+      box.appendChild(d);
+    }
+  } catch (e) {
+    box.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>";
+  }
+}
+
+async function openRecord(name) {
+  show("reader");
+  const box = $("#reader");
+  box.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const r = await (await fetch("/api/record/" + encodeURIComponent(name))).json();
+    box.innerHTML = mdToHtml(r.content);
+  } catch (e) {
+    box.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>";
+  }
+}
+
+/* 服务端存的 Markdown 格式很简单，做个迷你渲染 */
+function mdToHtml(md) {
+  const out = [];
+  let seg = null;
+  const flush = () => {
+    if (seg && (seg.ru || seg.zh)) {
+      out.push(`<div class="seg"><div class="t">${esc(seg.t || "")}</div>` +
+               `<div class="ru">${esc(seg.ru)}</div>` +
+               `<div class="zh">${esc(seg.zh)}</div></div>`);
+    }
+    seg = null;
+  };
+  for (const line of md.split("\n")) {
+    const t = line.match(/^\*\*(\d{2}:\d{2}:\d{2})\*\*\s+(.*)$/);
+    if (t) { flush(); seg = { t: t[1], ru: t[2], zh: "" }; continue; }
+    if (line.startsWith("# ")) { flush(); out.push(`<h2>${esc(line.slice(2))}</h2>`); continue; }
+    if (/^(开始|结束)时间：/.test(line)) { flush(); out.push(`<div class="meta">${esc(line)}</div>`); continue; }
+    if (line.trim() === "---" || line.trim() === "") { continue; }
+    if (seg) seg.zh += (seg.zh ? "\n" : "") + line;
+  }
+  flush();
+  return out.join("");
+}
+
+$("#btnStart").addEventListener("click", () => running ? stop() : start());
+$("#btnHist").addEventListener("click", loadHistory);
+$("#btnBack").addEventListener("click", () => show("live"));
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+# 课程记录与录音（体积大且含个人课堂内容，不入库）
+records/
+
+# API Key 等敏感配置
+.env
+*.key
+
+# 旧隧道方案残留（已改用 Tailscale，无需入库）
+cloudflared*.exe
+config.yml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
