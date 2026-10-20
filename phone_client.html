@@ -81,6 +81,35 @@
   #reader .seg .ru { color: var(--dim); font-size: 13px; margin: 4px 0; }
   #reader .seg .zh { font-size: 16px; }
   .empty { text-align: center; color: var(--dim); padding: 60px 0; font-size: 14px; }
+
+  /* ---------- 课堂纪要与提问卡片 ---------- */
+  #view-digest { display: none; padding: 118px 14px 90px; }
+  #view-digest.on { display: block; }
+  #digRange { padding: 20px 0 10px; }
+  #digBody { font-size: 15px; line-height: 1.8; }
+  #digBody h3 { font-size: 18px; margin: 16px 0 6px; }
+  #digBody h4 { font-size: 16px; margin: 14px 0 4px; color: var(--accent); }
+  #digBody ul { padding-left: 20px; margin: 4px 0 10px; }
+  #digBody li { margin-bottom: 4px; }
+  #digBody p { margin: 6px 0; }
+  #digBody strong { color: var(--live); }
+  #digAsk { margin-top: 26px; border-top: 1px solid var(--line); padding-top: 14px; }
+  .digq { font-size: 13px; color: var(--dim); margin-bottom: 8px; }
+  .digbtns { display: flex; gap: 10px; flex-wrap: wrap; }
+  .ans { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 10px 12px; margin-bottom: 10px; animation: pop .25s ease; }
+  .ans .q { font-size: 12px; color: var(--dim); margin-bottom: 5px; }
+  .ans .a { font-size: 15px; line-height: 1.65; }
+  /* 老师提问横幅 */
+  #qcard { display: none; position: sticky; top: 96px; z-index: 15;
+    background: rgba(91,140,255,.14); border: 1px solid var(--accent);
+    border-radius: 14px; padding: 12px 14px; margin-bottom: 14px; }
+  #qcard.on { display: block; animation: pop .25s ease; }
+  #qcard .qt { font-size: 12px; color: var(--accent); font-weight: 700;
+    margin-bottom: 6px; }
+  #qcard .qq { font-size: 16px; line-height: 1.5; margin-bottom: 10px; }
+  #qcard .btn { font-size: 13px; padding: 6px 14px; }
+  #btnDig.new::after { content: " ●"; color: var(--live); }
 </style>
 </head>
 <body>
@@ -89,6 +118,7 @@
   <span id="dot"></span>
   <span id="status">未开始</span>
   <button id="btnHist" class="btn ghost">记录</button>
+  <button id="btnDig" class="btn ghost">纪要</button>
   <button id="btnBack" class="btn ghost" style="display:none">返回</button>
   <button id="btnStart" class="btn">开始</button>
   <div id="subrow">
@@ -98,9 +128,22 @@
   <div id="micwrap"><div id="micbar"></div></div>
 </div>
 
-<div id="view-live"></div>
+<div id="view-live"><div id="qcard"><div class="qt">❓ 老师在提问</div><div class="qq"></div><button class="btn" id="btnAns">帮我回答</button></div></div>
 <div id="view-hist"><div class="empty">加载中…</div></div>
 <div id="reader"></div>
+<div id="view-digest">
+  <div id="digRange" class="empty">还在听课，纪要在每 5 分钟左右自动生成…</div>
+  <div id="digBody"></div>
+  <div id="digAsk">
+    <div class="digq">快速提问：</div>
+    <div class="digbtns">
+      <button class="btn ghost" data-q="没听懂刚才">😵 没听懂刚才</button>
+      <button class="btn ghost" data-q="现在要干嘛">📝 现在要干嘛</button>
+    </div>
+    <div class="digq" style="margin-top:14px">自己问：</div>
+    <div id="digAnswers"></div>
+  </div>
+</div>
 <div id="partial">点「开始」，把手机对着老师</div>
 
 <script>
@@ -233,6 +276,32 @@ function connect() {
 function render(o) {
   if (o.kind === "status") { setStatus(o.text || "", "on"); return; }
   if (o.kind === "partial") { $("#partial").textContent = "▶ " + (o.ru || ""); return; }
+  if (o.kind === "digest") {
+    $("#digRange").textContent = "🕐 " + (o.range || "");
+    $("#digRange").className = "";
+    $("#digBody").innerHTML = miniMd(o.md || "");
+    $("#btnDig").classList.add("new");
+    return;
+  }
+  if (o.kind === "answer") {
+    const box = $("#digAnswers");
+    const d = box.querySelector(".ans:last-child");
+    if (d && d.querySelector(".a").textContent === "思考中…") {
+      d.querySelector(".a").innerHTML = miniMd(o.a || "");
+    } else {
+      const nd = document.createElement("div");
+      nd.className = "ans";
+      nd.innerHTML = `<div class="q">🙋 ${esc(o.q || "")}</div><div class="a">${miniMd(o.a || "")}</div>`;
+      box.appendChild(nd);
+    }
+    return;
+  }
+  if (o.kind === "card") {
+    $("#qcard .qq").textContent = o.q || "";
+    $("#qcard").classList.add("on");
+    $("#btnAns").onclick = () => { sendAsk("怎么回答这个问题：" + o.q); };
+    return;
+  }
   if (o.kind === "final") {
     $("#partial").textContent = "…";
     const d = document.createElement("div");
@@ -252,10 +321,54 @@ function show(view) {
   $("#view-live").style.display = view === "live" ? "" : "none";
   $("#view-hist").style.display = view === "hist" ? "" : "none";
   $("#reader").style.display = view === "reader" ? "" : "none";
+  $("#view-digest").className = view === "digest" ? "on" : "";
   $("#partial").style.display = view === "live" ? "" : "none";
   $("#btnHist").style.display = view === "live" ? "" : "none";
+  $("#btnDig").style.display = view === "live" ? "" : "none";
   $("#btnBack").style.display = view === "live" ? "none" : "";
   window.scrollTo(0, 0);
+}
+
+/* ================= 课堂助理（纪要 / 提问 / 问答） ================= */
+function sendAsk(q) {
+  if (httpMode) {
+    fetch(`${API_BASE}/api/config?id=${cid}&q=${encodeURIComponent(q)}`).catch(() => {});
+  } else if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: "ask", q }));
+  } else {
+    setStatus("还没连上主机，等绿灯亮了再问", "err");
+  }
+  const d = document.createElement("div");
+  d.className = "ans";
+  d.innerHTML = `<div class="q">🙋 ${esc(q)}</div><div class="a" style="color:var(--dim)">思考中…</div>`;
+  $("#digAnswers").appendChild(d);
+  show("digest");
+}
+
+/* 迷你 Markdown 渲染（纪要用：# ## - ** 段落） */
+function miniMd(md) {
+  const lines = md.split("\n");
+  const out = [];
+  let inList = false;
+  const closeList = () => { if (inList) { out.push("</ul>"); inList = false; } };
+  const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  for (let line of lines) {
+    const t = line.trim();
+    if (!t) { closeList(); continue; }
+    if (t === "---") continue;
+    if (t.startsWith("### ")) { closeList(); out.push(`<h4>${inline(t.slice(4))}</h4>`); continue; }
+    if (t.startsWith("## ")) { closeList(); out.push(`<h3>${inline(t.slice(3))}</h3>`); continue; }
+    if (t.startsWith("# ")) { closeList(); out.push(`<h3>${inline(t.slice(2))}</h3>`); continue; }
+    if (t.startsWith("- ") || t.startsWith("* ")) {
+      if (!inList) { out.push("<ul>"); inList = true; }
+      out.push(`<li>${inline(t.slice(2))}</li>`);
+      continue;
+    }
+    closeList();
+    out.push(`<p>${inline(t)}</p>`);
+  }
+  closeList();
+  return out.join("");
 }
 
 async function loadHistory() {
@@ -318,6 +431,13 @@ function mdToHtml(md) {
 $("#btnStart").addEventListener("click", () => running ? stop() : start());
 $("#btnHist").addEventListener("click", loadHistory);
 $("#btnBack").addEventListener("click", () => show("live"));
+$("#btnDig").addEventListener("click", () => {
+  $("#btnDig").classList.remove("new");
+  const cur = $("#view-digest").className === "on";
+  show(cur ? "live" : "digest");
+});
+document.querySelectorAll("#digAsk [data-q]").forEach(b =>
+  b.addEventListener("click", () => sendAsk(b.dataset.q)));
 </script>
 </body>
 </html>
