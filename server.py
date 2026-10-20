@@ -188,6 +188,117 @@ def make_fix_translator(api_key: str, base_url: str, model: str, subject: str, g
     return fix_translate
 
 
+# ---------------- 课堂助理（纪要 / 提问提醒 / 随堂问答） ----------------
+def make_llm_asker(api_key: str, base_url: str, model: str):
+    """通用 LLM 调用，供课堂助理用（同步，放线程里跑）。"""
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+
+    def ask(system: str, user: str, max_tokens: int = 2048):
+        for attempt in range(2):
+            try:
+                r = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "system", "content": system},
+                              {"role": "user", "content": user}],
+                    temperature=0.3, max_tokens=max_tokens)
+                return r.choices[0].message.content.strip()
+            except Exception as e:
+                print(f"[助理重试 {attempt + 1}/2] {e}", flush=True)
+                time.sleep(1.5 * (attempt + 1))
+        return None
+
+    return ask
+
+
+class Assistant:
+    """每个连接一个。维护全文 transcript，周期性生成纪要、判断老师是否提问、回答学生提问。"""
+    DIGEST_EVERY_N = 12       # 每满 12 句触发一次
+    DIGEST_EVERY_S = 300      # 或距上次digest满 5 分钟
+
+    def __init__(self, ask, subject_getter, send):
+        self.ask = ask                    # sync callable(system, user, max_tokens)
+        self.subject = subject_getter     # callable -> 当前课程名
+        self.send = send                  # async callable(dict)
+        self.lines = []                   # [(时间, 俄语, 中文), ...] 全量
+        self.last_digest_n = 0
+        self.last_digest_t = time.monotonic()
+        self.q_sig = ""                   # 已提醒过的问题签名，去重
+        self.busy = False
+
+    def feed(self, ru: str, zh: str):
+        """每出一条 final 调一次（同步，快速返回）。"""
+        self.lines.append((time.strftime("%H:%M:%S"), ru, zh))
+        n_new = len(self.lines) - self.last_digest_n
+        if (n_new >= self.DIGEST_EVERY_N
+                or time.monotonic() - self.last_digest_t >= self.DIGEST_EVERY_S):
+            asyncio.ensure_future(self._tick())
+
+    def _fmt(self, lines):
+        return "\n".join(f"[{t}] {ru} ⇒ {zh}" for t, ru, zh in lines)
+
+    async def _tick(self):
+        if self.busy:
+            return
+        self.busy = True
+        try:
+            self.last_digest_n = len(self.lines)
+            self.last_digest_t = time.monotonic()
+            subj = self.subject() or "大学"
+            system = (
+                f"你是「{subj}」课堂的学习助理，服务对象是听不懂俄语的中国留学生。\n"
+                "输入是课堂实时转写（每行：时间 俄语⇒中文），按顺序给出两块输出：\n"
+                "1) 第一行必须是 META: 提问=<无 或 老师刚提出的问题的原文（中文）> | "
+                "回答=<如果老师是在提问，给一份简短的中文参考回答；否则留空>\n"
+                "2) 然后一行 ---，之后是中文 Markdown 课堂纪要：先一句结论（这节课在讲什么），"
+                "再按主题分节（## 小节标题 + 要点列表 - ），术语保留中文，"
+                "覆盖截止目前的全部内容（不是增量），不要编造没出现的内容。"
+            )
+            out = await asyncio.to_thread(self.ask, system, self._fmt(self.lines), 2048)
+            if not out:
+                return
+            meta, _, md = out.partition("\n---")
+            md = md.lstrip("\n-").strip()
+            q, a = "", ""
+            m = re.search(r"META:\s*提问=(.*?)\s*\|\s*回答=(.*)", meta)
+            if m:
+                q, a = m.group(1).strip().strip("<>"), m.group(2).strip().strip("<>")
+            if md:
+                await self.send({"kind": "digest", "md": md,
+                                 "range": f"{self.lines[0][0]} ~ {self.lines[-1][0]}"})
+            if q and q != "无" and q != self.q_sig:
+                self.q_sig = q
+                await self.send({"kind": "card", "q": q, "a": a})
+        finally:
+            self.busy = False
+
+    async def answer(self, q: str):
+        """回答客户端提问：'没听懂刚才'/'现在要干嘛' 走预设，其他直通。"""
+        q = (q or "").strip()
+        if not q:
+            return
+        if not self.lines:
+            await self.send({"kind": "answer", "q": q, "a": "还没有收到课堂内容，等老师开始讲课后再问~"})
+            return
+        subj = self.subject() or "大学"
+        if "没听懂" in q or "刚才" in q:
+            system = (f"你是「{subj}」课堂的学习助理。学生说没听懂刚才的内容。"
+                      "把输入里最近若干句课堂内容用中文大白话解释清楚：先一句话总结老师在说啥，"
+                      "再拆开讲要点（术语给中文），必要时举个简单例子。语气像耐心的同学。")
+            body = self._fmt(self.lines[-15:])
+        elif "干嘛" in q or "作业" in q or "任务" in q or "考试" in q:
+            system = (f"你是「{subj}」课堂的学习助理。从整节课内容里梳理老师布置过的"
+                      "任务/作业/考试安排/下节课要求：有就逐条列清楚（带时间），"
+                      "没有就直说'目前没提到'，不要编造。")
+            body = self._fmt(self.lines)
+        else:
+            system = (f"你是「{subj}」课堂的学习助理。结合课堂内容回答学生的问题，"
+                      "先给结论再解释，中文回答，保持简洁。")
+            body = self._fmt(self.lines) + f"\n\n【学生的问题】\n{q}"
+        a = await asyncio.to_thread(self.ask, system, body, 1024)
+        await self.send({"kind": "answer", "q": q,
+                         "a": a or "（这题没答上来，再问一次试试）"})
+
+
 # ---------------- 一次课堂会话 ----------------
 class Session:
     def __init__(self, asr, translate, send,
@@ -324,7 +435,8 @@ class Session:
 
 
 # ---------------- 入口 ----------------
-async def handle(ws, asr, translate_factory, fix_factory=None, session_opts=None):
+async def handle(ws, asr, translate_factory, fix_factory=None, session_opts=None,
+                 ask=None):
     # 每个连接独立维护课程名和记录文件；课程名可由客户端随时改
     state = {"subject": SUBJECT, "rec": None}
     translate = translate_factory(state["subject"])
@@ -340,10 +452,13 @@ async def handle(ws, asr, translate_factory, fix_factory=None, session_opts=None
                 rec.write(f"**{time.strftime('%H:%M:%S')}**  {obj.get('ru', '')}\n\n"
                           f"{obj.get('zh', '')}\n\n---\n\n")
                 rec.flush()
+            assistant.feed(obj.get("ru", ""), obj.get("zh", ""))
         try:
             await ws.send(json.dumps(obj, ensure_ascii=False))
         except websockets.ConnectionClosed:
             pass  # 客户端已走，记录已落盘，无需处理
+
+    assistant = Assistant(ask, lambda: state["subject"], send)
 
     session = Session(asr, translate, send, fix_translate=fix_translate,
                       **(session_opts or {}))
@@ -368,6 +483,8 @@ async def handle(ws, asr, translate_factory, fix_factory=None, session_opts=None
                             session.fix_translate = fix_factory(subj)
                         print(f"[配置] 课程名改为: {subj}", flush=True)
                         await send({"kind": "status", "text": f"当前课程：{subj}"})
+                elif cfg.get("type") == "ask":
+                    asyncio.ensure_future(assistant.answer(str(cfg.get("q", ""))))
                 continue
             if isinstance(message, (bytes, bytearray)):
                 if wav is None:
@@ -437,7 +554,7 @@ def main():
         with open(args.glossary_file, encoding="utf-8") as f:
             glossary = f.read().strip()
 
-    print("[版本] v13 · LLM纠错回环(修识别错误再翻)+final beam=5 · 2026-10")
+    print("[版本] v14 · +课堂助理(自动纪要/提问提醒/随堂问答) · 2026-10")
     print(f"[加载模型] {args.model} ({args.device}/{args.compute_type}) ...")
     asr = WhisperModel(args.model, device=args.device, compute_type=args.compute_type)
     def translate_factory(subj: str):
@@ -464,6 +581,8 @@ def main():
     # partial 用 --beam-size（默认3）保证速度，final 固定 5 追准确率
     session_opts = {"beam_size": args.beam_size, "initial_prompt": initial_prompt,
                   "final_beam_size": 5}
+    asker = make_llm_asker(args.deepseek_key, args.translate_base_url,
+                           args.translate_model)
 
     # 手机网页版客户端：手机浏览器访问 http(s)://主机地址/ 即可使用，
     # 不需要在手机上安装任何东西
@@ -535,7 +654,9 @@ def main():
                     c["rec"].write(f"**{time.strftime('%H:%M:%S')}**  {obj.get('ru', '')}\n\n"
                                    f"{obj.get('zh', '')}\n\n---\n\n")
                     c["rec"].flush()
+                c["assistant"].feed(obj.get("ru", ""), obj.get("zh", ""))
 
+        c["assistant"] = Assistant(asker, lambda: c["subject"], send)
         c["session"] = Session(asr, translate_factory(c["subject"]), send,
                                fix_translate=fix_factory(c["subject"]),
                                **(session_opts or {}))
@@ -573,12 +694,16 @@ def main():
                 self._json({"msgs": msgs})
             elif parsed.path == "/api/config" and cid:
                 subj = qs.get("subject", [""])[0].strip()
+                q = qs.get("q", [""])[0].strip()
                 c = get_http_client(cid)
                 if subj and subj != c["subject"]:
                     c["subject"] = subj
                     c["session"].translate = translate_factory(subj)
                     c["session"].fix_translate = fix_factory(subj)
                     print(f"[配置] (HTTP) {cid[:8]} 课程名: {subj}", flush=True)
+                if q:
+                    asyncio.run_coroutine_threadsafe(c["assistant"].answer(q),
+                                                     rt["loop"])
                 self._json({"ok": True})
             else:
                 self._json({"error": "not found"}, 404)
@@ -606,7 +731,7 @@ def main():
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         print(f"[就绪] HTTP 兼容通道: 端口 {args.http_port}（Tailscale 用 8443 映射它）")
         async with websockets.serve(
-            lambda ws: handle(ws, asr, translate_factory, fix_factory, session_opts),
+            lambda ws: handle(ws, asr, translate_factory, fix_factory, session_opts, asker),
             args.host, args.port, max_size=2 ** 22, ping_interval=20,
             process_request=process_request,
         ):
