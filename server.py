@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-俄语课堂实时翻译 · 服务端（跑在寝室 5060 主机上，Windows）
+俄语课堂实时翻译 · 服务端（跑在寝室主机上，Windows）
 
-流程：笔记本推来的 PCM 音频 -> silero-VAD 切句 -> faster-whisper 俄语识别
-      -> DeepSeek 翻译成中文 -> 回传给笔记本显示
+流程：笔记本推来的 PCM 音频 -> silero-VAD 切句 -> 俄语识别（GigaAM 或 Whisper）
+      -> LLM 纠错翻译成中文 -> 回传给笔记本显示
 
 启动示例：
-    python server.py --deepseek-key sk-xxxx --subject "宏观经济学"
+    python server.py --subject "宏观经济学"
 """
 import argparse
 import asyncio
@@ -304,8 +304,9 @@ class Session:
     def __init__(self, asr, translate, send,
                  min_silence_ms=600, partial_every=1.5, max_seg_s=15,
                  beam_size=3, initial_prompt="", fix_translate=None,
-                 final_beam_size=None):
-        self.asr = asr                 # WhisperModel
+                 final_beam_size=None, asr_engine="whisper"):
+        self.asr = asr                 # WhisperModel 或 onnx_asr 模型
+        self.asr_engine = asr_engine   # "whisper" | "gigaam"
         self.translate = translate     # callable: ru -> zh
         self.fix_translate = fix_translate  # callable: (ru, ctx) -> (ru_fixed, zh) | None
         self.send = send               # async callable(dict)
@@ -394,6 +395,14 @@ class Session:
         self.seg_samples = 0
 
     def _asr_run(self, audio: np.ndarray, beam_size: int = None) -> str:
+        if self.asr_engine == "gigaam":
+            # GigaAM v2 RNNT（俄语专用）：直接吃 float32 音频，无需 beam/prompt
+            r = self.asr.recognize(audio.astype(np.float32, copy=False))
+            if isinstance(r, list):
+                r = r[0]
+            if isinstance(r, dict):
+                r = r.get("text", "")
+            return str(r).strip()
         segments, _ = self.asr.transcribe(
             audio, language="ru",
             beam_size=beam_size if beam_size is not None else self.beam_size,
@@ -521,9 +530,14 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--asr-engine", choices=["gigaam", "whisper"], default="gigaam",
+                   help="识别引擎：gigaam=GigaAM v2（俄语专用，CPU 即可，默认）；"
+                        "whisper=faster-whisper（通用多语种，需显卡）")
+    p.add_argument("--gigaam-dir", default="",
+                   help="GigaAM ONNX 模型目录（默认 ./models/gigaam-v2）")
     p.add_argument("--model", default="large-v3",
-                   help="faster-whisper 模型。large-v3 抗噪/远场最好（默认，约 4.5G 显存）；"
-                        "large-v3-turbo 更快但嘈杂环境幻觉偏多")
+                   help="faster-whisper 模型（仅 --asr-engine whisper 时用到）。"
+                        "large-v3 抗噪/远场最好；large-v3-turbo 更快但嘈杂环境幻觉偏多")
     p.add_argument("--device", default="cuda")
     p.add_argument("--compute-type", default="int8_float16")
     p.add_argument("--beam-size", type=int, default=3,
@@ -538,7 +552,7 @@ def main():
                    help="术语对照表 txt 路径（每行：俄语=中文）")
     p.add_argument("--records-dir", default="records",
                    help="课程记录保存目录，默认 ./records；设为空字符串可关闭记录")
-    p.add_argument("--http-port", type=int, default=8766,
+    p.add_argument("--http-port", type=int, default=8766",
                    help="HTTP 兼容通道端口（WebSocket 被代理吞掉时的备用方案）")
     args = p.parse_args()
 
@@ -554,9 +568,18 @@ def main():
         with open(args.glossary_file, encoding="utf-8") as f:
             glossary = f.read().strip()
 
-    print("[版本] v14 · +课堂助理(自动纪要/提问提醒/随堂问答) · 2026-10")
-    print(f"[加载模型] {args.model} ({args.device}/{args.compute_type}) ...")
-    asr = WhisperModel(args.model, device=args.device, compute_type=args.compute_type)
+    print("[版本] v15 · 识别引擎换GigaAM(俄语专用,幻觉少)+课堂助理 · 2026-10")
+    asr = None
+    if args.asr_engine == "gigaam":
+        import onnx_asr
+        gdir = args.gigaam_dir or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "models", "gigaam-v2")
+        print(f"[加载模型] GigaAM v2 RNNT (onnx/int8, 目录 {gdir}) ...")
+        asr = onnx_asr.load_model("gigaam-v2-rnnt", path=gdir, quantization="int8")
+        print("[加载模型] GigaAM 就绪（CPU 推理，不占用显卡）")
+    else:
+        print(f"[加载模型] {args.model} ({args.device}/{args.compute_type}) ...")
+        asr = WhisperModel(args.model, device=args.device, compute_type=args.compute_type)
     def translate_factory(subj: str):
         # 每个连接/每次改课程名都独立创建一个翻译器
         return make_translator(args.deepseek_key, args.translate_base_url,
@@ -566,7 +589,7 @@ def main():
         return make_fix_translator(args.deepseek_key, args.translate_base_url,
                                    args.translate_model, subj or "大学", glossary)
 
-    # 识别预热提示：课程名 + 术语表里的俄语术语，显著提升专业词汇识别率
+    # 识别预热提示：课程名 + 术语表里的俄语术语，显著提升专业词汇识别率（仅 whisper 引擎）
     initial_prompt = ""
     ru_terms = [line.split("=", 1)[0].strip() for line in glossary.splitlines()
                 if "=" in line][:50]
@@ -578,9 +601,9 @@ def main():
     initial_prompt = " ".join(prompt_parts)
     if initial_prompt:
         print(f"[术语预热] 已注入 {len(ru_terms)} 个俄语术语到识别模型")
-    # partial 用 --beam-size（默认3）保证速度，final 固定 5 追准确率
+    # partial 用 --beam-size（默认3）保证速度，final 固定 5 追准确率（仅 whisper 引擎）
     session_opts = {"beam_size": args.beam_size, "initial_prompt": initial_prompt,
-                  "final_beam_size": 5}
+                  "final_beam_size": 5, "asr_engine": args.asr_engine}
     asker = make_llm_asker(args.deepseek_key, args.translate_base_url,
                            args.translate_model)
 
