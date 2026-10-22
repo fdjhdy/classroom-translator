@@ -1,15 +1,18 @@
 # 俄语课堂实时翻译系统
 
-手机/笔记本在教室收音，寝室主机（RTX 5060）跑识别和翻译，字幕实时回传，
+手机/笔记本在教室收音，寝室主机跑识别和翻译，字幕实时回传，
 每节课自动存档（Markdown 记录 + 完整 WAV 录音），课后一键精翻成笔记。
-v14 起内置**课堂助理**：每 ~5 分钟自动生成中文课堂纪要、检测到老师在提问时
-弹卡片提醒（附参考回答）、随时向课堂内容提问（"没听懂刚才"/"现在要干嘛"或自由提问）。
+- **v15 识别引擎换 GigaAM**（Sber 开源的俄语专用模型，ONNX int8，CPU 推理）：
+  实测比 Whisper large-v3 幻觉更少（不再把片头音乐听成"Продолжение следует..."），
+  远场嘈杂俄语识别明显更准；`--asr-engine whisper` 可切回 faster-whisper
+- **v14 内置课堂助理**：每 ~5 分钟自动生成中文课堂纪要、检测到老师在提问时
+  弹卡片提醒（附参考回答）、随时向课堂内容提问（"没听懂刚才"/"现在要干嘛"或自由提问）
 
 ```
-教室: 手机/笔记本浏览器                    寝室: 5060 主机
+教室: 手机/笔记本浏览器                    寝室: 主机
   麦克风收音 ──Tailscale 隧道──▶  silero-VAD 切句
-  字幕/历史记录 ◀── 回传 ────     faster-whisper 俄语识别（large-v3）
-                                  LLM API 翻译成中文（带上下文+术语表）
+  字幕/历史记录 ◀── 回传 ────     GigaAM v2 俄语识别（CPU）/ faster-whisper（备用）
+                                  LLM 纠错+翻译成中文（带上下文+术语表）
                                   ├── records/*.md   逐句记录
                                   └── records/*.wav  整课录音 → post_refine.py 精翻
 ```
@@ -21,12 +24,25 @@ v14 起内置**课堂助理**：每 ~5 分钟自动生成中文课堂纪要、�
 Python 3.10~3.12，然后：
 
 ```bat
-python -m pip install faster-whisper silero-vad onnxruntime websockets openai numpy
+python -m pip install faster-whisper silero-vad onnxruntime websockets openai numpy onnx-asr
 python -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 ```
 
-第二条是显卡推理必需的运行库。**注意：装完必须重启 server 进程才生效**
+第二条只有用 `--asr-engine whisper`（显卡推理）才需要。**装完必须重启 server 进程才生效**
 （DLL 搜索路径在进程启动时定死）。
+
+### 1.5 下载 GigaAM 模型（约 240MB，首次）
+
+模型文件不入库（见 .gitignore），从 HuggingFace 镜像下载到 `models/gigaam-v2/`：
+
+```bat
+mkdir models\gigaam-v2 2>nul & cd models\gigaam-v2
+curl -L -o v2_rnnt_encoder.int8.onnx https://hf-mirror.com/istupakov/gigaam-v2-onnx/resolve/main/v2_rnnt_encoder.int8.onnx
+curl -L -o v2_rnnt_decoder.int8.onnx https://hf-mirror.com/istupakov/gigaam-v2-onnx/resolve/main/v2_rnnt_decoder.int8.onnx
+curl -L -o v2_rnnt_joint.int8.onnx   https://hf-mirror.com/istupakov/gigaam-v2-onnx/resolve/main/v2_rnnt_joint.int8.onnx
+curl -L -o v2_vocab.txt              https://hf-mirror.com/istupakov/gigaam-v2-onnx/resolve/main/v2_vocab.txt
+cd ..\..
+```
 
 ### 2. 配置 API Key
 
@@ -124,7 +140,9 @@ Key 同样从环境变量 `TRANSLATE_API_KEY` 读取（也可用 `--key` 显式�
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--model` | large-v3 | 识别模型；large-v3-turbo 更快但嘈杂环境幻觉多 |
+| `--asr-engine` | gigaam | 识别引擎：gigaam（俄语专用，CPU）/ whisper（多语种，显卡） |
+| `--gigaam-dir` | ./models/gigaam-v2 | GigaAM 模型文件目录 |
+| `--model` | large-v3 | （仅 whisper 引擎）识别模型；large-v3-turbo 更快但嘈杂环境幻觉多 |
 | `--beam-size` | 3 | 越大越准越慢 |
 | `--deepseek-key` | 环境变量 `TRANSLATE_API_KEY` | 翻译 API Key |
 | `--translate-base-url` / `--translate-model` | DeepSeek 官方 | 换硅基流动见启动示例 |
@@ -150,8 +168,9 @@ Key 同样从环境变量 `TRANSLATE_API_KEY` 读取（也可用 `--key` 显式�
 
 ## 七、文件清单
 
-- `server.py` — 主机服务端（VAD 切句 + 识别 + 翻译 + WebSocket 主通道 + HTTP 兼容通道 + 网页分发 + 记录/录音存档 + 课堂助理：纪要/提问检测/随堂问答）
+- `server.py` — 主机服务端（VAD 切句 + 识别[GigaAM/Whisper 双引擎] + LLM 纠错翻译 + WebSocket 主通道 + HTTP 兼容通道 + 网页分发 + 记录/录音存档 + 课堂助理）
 - `phone_client.html` — 网页客户端（手机/笔记本浏览器用，server 自动分发）
 - `post_refine.py` — 课后精翻脚本（WAV 重新识别 + 带上下文翻译出笔记）
 - `start.bat` — 一键启动示例（Key 从环境变量读取）
+- `models/gigaam-v2/` — GigaAM 模型文件（240MB，按部署 1.5 节下载；不入库）
 - `glossary.txt` — 术语表（自建，越攒越准；不入库）

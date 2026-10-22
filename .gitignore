@@ -1,6 +1,15 @@
 # 课程记录与录音（体积大且含个人课堂内容，不入库）
 records/
 
+# 模型文件（体积大，按 README 部署 1.5 节下载）
+models/
+
+# 实验/下载临时文件
+_*.log
+_canary_parts/
+_canary.nemo
+_canary_parts.nemo
+
 # API Key 等敏感配置
 .env
 *.key
