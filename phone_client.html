@@ -132,18 +132,34 @@
     padding:10px 12px; margin-bottom:10px; animation:pop .25s ease; }
   .ans .q { font-size:12px; color:var(--dim); margin-bottom:5px; }
   .ans .a { font-size:15px; line-height:1.65; }
-  /* 老师提问横幅 */
-  #qcard { display:none; position:sticky; top:104px; z-index:15;
+  /* 老师提问浮层（非阻塞，悬在字幕上方，不占用滚动位置） */
+  #qcard { display:none; position:fixed; left:12px; right:12px; bottom:78px; z-index:28;
     background:var(--accent-soft); border:1px solid rgba(108,155,255,.45);
-    backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px);
-    border-radius:var(--radius); padding:13px 15px; margin:0 auto 14px; max-width:640px;
+    backdrop-filter:blur(12px); -webkit-backdrop-filter:blur(12px);
+    border-radius:var(--radius); padding:13px 15px; margin:0 auto; max-width:620px;
     box-shadow:var(--shadow); }
-  #qcard.on { display:block; animation:pop .25s ease; }
+  #qcard.on { display:block; animation:toastIn .3s ease; }
+  @keyframes toastIn { from { opacity:0; transform:translateY(14px); } }
   #qcard .qt { font-size:12px; color:var(--accent); font-weight:700;
     margin-bottom:6px; letter-spacing:.04em; }
   #qcard .qq { font-size:16px; line-height:1.5; margin-bottom:10px; }
   #qcard .btn { font-size:13px; padding:6px 14px; }
+  #qclose { position:absolute; top:9px; right:11px; background:none; border:0;
+    color:var(--dim); font-size:17px; line-height:1; padding:4px; cursor:pointer; }
   #btnDig.new::after { content:" ●"; color:var(--live); }
+
+  /* ---------- 专注模式：隐藏所有按钮，只留大字字幕 ---------- */
+  body.focus #bar .row1 .btn, body.focus #bar .row2 { display:none; }
+  body.focus #bar { padding-bottom:12px; }
+  body.focus .entry .t, body.focus .entry .ru { display:none; }
+  body.focus .entry { opacity:.45; padding:9px 14px; }
+  body.focus .entry .zh { font-size:15px; font-weight:400; }
+  body.focus .entry.hero { opacity:1; padding:16px 18px;
+    border-color:rgba(255,207,92,.5); background:var(--card2); }
+  body.focus .entry.hero .zh { font-size:26px; font-weight:700; line-height:1.5; }
+  body.focus .entry.hero .ru { display:block; font-size:15px; }
+  body.focus #jump { bottom:82px; }
+  #btnFocus.on { color:var(--live); border-color:rgba(255,207,92,.5); }
 </style>
 </head>
 <body>
@@ -154,6 +170,7 @@
     <span id="status">未开始</span>
     <button id="btnHist" class="btn ghost">记录</button>
     <button id="btnDig" class="btn ghost">纪要</button>
+    <button id="btnFocus" class="btn ghost">专注</button>
     <button id="btnBack" class="btn ghost" style="display:none">返回</button>
     <button id="btnStart" class="btn">开始</button>
   </div>
@@ -163,7 +180,7 @@
   <div id="micwrap"><div id="micbar"></div></div>
 </div>
 
-<div id="view-live"><div id="qcard"><div class="qt">❓ 老师在提问</div><div class="qq"></div><button class="btn" id="btnAns">帮我回答</button></div></div>
+<div id="view-live"><div id="qcard"><button id="qclose">✕</button><div class="qt">❓ 老师在提问</div><div class="qq"></div><button class="btn" id="btnAns">帮我回答</button></div></div>
 <div id="view-hist"><div class="empty">加载中…</div></div>
 <div id="reader"></div>
 <div id="view-digest">
@@ -387,6 +404,7 @@ function show(view) {
   $("#partial").style.display = view === "live" ? "" : "none";
   $("#btnHist").style.display = view === "live" ? "" : "none";
   $("#btnDig").style.display = view === "live" ? "" : "none";
+  $("#btnFocus").style.display = view === "live" ? "" : "none";
   $("#btnBack").style.display = view === "live" ? "none" : "";
   window.scrollTo(0, 0);
   atBottom = true;
@@ -490,6 +508,16 @@ function mdToHtml(md) {
   flush();
   return out.join("");
 }
+
+/* 专注模式：隐藏按钮和原文，只放大当前这句（状态本地记住） */
+const btnFocus = $("#btnFocus");
+if (localStorage.getItem("focus") === "1") { document.body.classList.add("focus"); btnFocus.classList.add("on"); }
+btnFocus.addEventListener("click", () => {
+  const on = document.body.classList.toggle("focus");
+  btnFocus.classList.toggle("on", on);
+  localStorage.setItem("focus", on ? "1" : "0");
+});
+$("#qclose").addEventListener("click", () => $("#qcard").classList.remove("on"));
 
 $("#btnStart").addEventListener("click", () => running ? stop() : start());
 $("#btnHist").addEventListener("click", loadHistory);
